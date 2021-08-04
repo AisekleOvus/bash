@@ -1,0 +1,61 @@
+#!/bin/bash
+current_date=$(date +'%Y-%m-%d')
+echo $current_date
+inputJSON=$(curl -s "https://api.hh.ru/vacancies?specialization=1&industry=7&text=%D1%81%D1%82%D0%B0%D0%B6%D0%B5%D1%80%20OR%20%D1%82%D0%B0%D0%B6%D0%B8%D1%80%D0%BE%D0%B2%D0%BA%D0%B0&date_from=$current_date&per_page=100")
+found=$(jq '.found' <<< $inputJSON)
+pages=$(jq '.pages' <<< $inputJSON)
+
+echo have found $found vacancies
+
+wholeOutput=([0]=$inputJSON)
+
+for ((i=1; i<pages; i++))
+do
+    wholeOutput[i]=$(curl -s "https://api.hh.ru/vacancies?specialization=1&industry=7&text=%D1%81%D1%82%D0%B0%D0%B6%D0%B5%D1%80%20OR%20%D1%82%D0%B0%D0%B6%D0%B8%D1%80%D0%BE%D0%B2%D0%BA%D0%B0&date_from=$current_date&page=$i&per_page=100" | jq '.items[]')
+done
+
+items=$(echo ${wholeOutput[*]} | jq 'select(.name|test(".*(стажер|стажировка|Стажер|Стажировка).*"))')
+idArray=($(jq '.id | select( . != null )' <<< $items))
+echo At least we have ${#idArray[*]} identities
+
+for ((indx=1; indx<${#idArray[*]}; indx++))
+do
+echo $indx
+    identity=${idArray[indx]}
+    item=$(jq --arg identity "$identity" "select(.id==$identity)" <<< $items)
+    item_id=$(jq ".id" <<< $item)
+    keyfromDB=$(mysql --login-path=catpplication -Nse "use catpplication; select KEY_FIELD from vacancy_id where VACANCY_ID=$item_id;")
+    if [[ -z $keyfromDB ]]; then
+
+    if [ $(($indx%20)) -eq 0 ]; 
+    then 
+        echo "$indx % 20 = $(($indx%20)) Спим 60 сек !!!"
+        sleep 60 
+    fi
+        item_name=$(jq ".name" <<< $item | tr -d '"')
+        item_salary_from=$(jq ".salary.from" <<< $item | sed 's/null/\.\.\./')
+        item_salary_to=$(jq ".salary.to" <<< $item | sed 's/null/\.\.\./' )
+        item_salary_cur=$(jq ".salary.currency" <<< $item | tr -d 'null' | tr -d '"' | sed 's/RUR/₽/' | sed 's/EUR/€/' | sed 's/USD/$/')
+        item_salary=$(echo "от $item_salary_from до $item_salary_to $item_salary_cur")
+        item_url=$(jq ".alternate_url" <<< $item  )
+        item_area=$(jq ".area.name" <<< $item  | tr -d '"' | tr ' ' '_' | tr '-' '_')
+        item_employer=$(jq ".employer.name" <<< $item  | tr -d '"' | tr -d ',' | tr ' ' '_' | tr '-' '_')
+        item_logo=$(jq '.employer.logo_urls.original' <<< $item  | tr -d '"')
+        item_requirement=$(jq ".snippet.requirement" <<< $item | tr -d '"' | tr -d 'null' | tr -d '...')
+        item_responsibility=$(jq ".snippet.responsibility" <<< $item | tr -d '"' | tr -d 'null' | tr -d '...')
+        responsibility=$item_responsibility
+        if [[ ! -z $item_responsibility ]]; then
+        responsibility="%0A<b><u>Сфера деятельности</u>:</b>%0A<i>$item_responsibility ...  <a href=$item_url> читать целиком</a></i>"
+        fi
+        requirement=$item_requirement
+        if [[ ! -z $item_requirement ]]; then
+        requirement="%0A<b><u>Ожидания</u>:</b>%0A<i>$item_requirement ... <a href=$item_url> читать целиком</a></i>"
+        fi
+        caption="<b>#$item_employer</b>%0A<i>г.#$item_area</i>%0A%0A<u>ТРЕБУЕТСЯ:</u>%0A<b>$item_name</b>%0A%0AЗ/П: <b>$item_salary</b>%0A$requirement%0A$responsibility%0A%0A<a href=$item_url><i>Подробнее о вакансии</i></a>"
+
+        curl --data "chat_id=@dverit&photo=$item_logo&caption=$caption&parse_mode=HTML" https://api.telegram.org/bot<IDENTIFICATOR>/sendPhoto
+        echo $item_id will be inserted into VACANCY_ID
+        mysql --login-path=catpplication -Nse "use catpplication; insert into vacancy_id (VACANCY_ID) values ($item_id);"
+    fi
+done
+exit 0
